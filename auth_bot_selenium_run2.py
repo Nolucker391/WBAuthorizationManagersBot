@@ -962,6 +962,8 @@ class WildberriesSeleniumAuth:
         with open(filename, "rb") as img:
             bot.send_photo(687061691, img, caption=f"{step_name} @ {timestamp}")
 
+        await asyncio.sleep(1)
+
         # Удаляем скрин сразу после отправки
         try:
             os.remove(filename)
