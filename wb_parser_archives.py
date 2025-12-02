@@ -183,23 +183,23 @@ async def get_actual_auth_data():
     """
     today_limit = datetime.date(2025, 12, 1)
     async with get_db_connection() as conn:
-        # rows = await conn.fetch("""
-        #     SELECT phone_number, cookies, auth_token, user_agent, proxy_name, chat_id, proxy_id, last_parsing_date
-        #     FROM auth_user
-        #     WHERE is_verified = true
-        # """)
-        phone_numbers = [
-            "+79888514061"
-        ]
-
-        rows = await conn.fetch(
-            """
+        rows = await conn.fetch("""
             SELECT phone_number, cookies, auth_token, user_agent, proxy_name, chat_id, proxy_id, last_parsing_date
             FROM auth_user
-            WHERE phone_number = ANY($1)
-            """,
-            phone_numbers
-        )
+            WHERE is_verified = true
+        """)
+        # phone_numbers = [
+        #     "+79888514061"
+        # ]
+        #
+        # rows = await conn.fetch(
+        #     """
+        #     SELECT phone_number, cookies, auth_token, user_agent, proxy_name, chat_id, proxy_id, last_parsing_date
+        #     FROM auth_user
+        #     WHERE phone_number = ANY($1)
+        #     """,
+        #     phone_numbers
+        # )
 
     auth_data_dict = {}
     for row in rows:
