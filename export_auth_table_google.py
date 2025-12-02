@@ -35,7 +35,7 @@ def parse_google_table(dataframe):
         'https://www.googleapis.com/auth/drive'
     ]
     #
-    creds = Credentials.from_service_account_file('new_creds.json')
+    creds = Credentials.from_service_account_file('new_0212creds.json')
     creds = creds.with_scopes(scope)
     client = gspread.authorize(creds)
 

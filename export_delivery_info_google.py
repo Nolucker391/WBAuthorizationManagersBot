@@ -102,6 +102,6 @@ if __name__ == "__main__":
     parser = WBActiveOrdersParser(
         json_path="directions_decoding.json",
         spreadsheet_key="1MfEmSPcrhxKQdfqPIRltO4_Fd1y_c07Mmnp3s1IBKGY",
-        creds_path="new_creds.json",
+        creds_path="new_0212creds.json",
     )
     asyncio.run(parser.run())
