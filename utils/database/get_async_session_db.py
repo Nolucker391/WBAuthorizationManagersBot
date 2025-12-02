@@ -23,9 +23,9 @@ async def get_db_connection():
 async def get_db_driver_connection():
     conn = await asyncpg.connect(
         user='analitycs_user',
-        password='solution80almirdb80',
+        password='solutionti432muralmirka827',
         database='driver_fence',
-        host='185.47.207.55',
+        host='91.105.198.24',
         port=5433
     )
     try:

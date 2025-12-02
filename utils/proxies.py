@@ -88,10 +88,8 @@ async def get_valid_proxy(phone_number: str, chat_id: int) -> str | None:
                     'count': count or 0
                 })
 
-            # Сортируем по количеству пользователей (от меньшего к большему)
             proxy_counts.sort(key=lambda x: x['count'])
 
-            # Выбираем прокси с наименьшим количеством пользователей
             selected_proxy = proxy_counts[0]
             proxy_name = selected_proxy['name']
 
@@ -117,11 +115,14 @@ async def change_proxy_ip(proxy_name: str, *, timeout: float = 10.0) -> bool:
         host, port = host_part.split(":")
 
         modem_suffix = ''.join(ch for ch in port if ch.isdigit())
-        if len(modem_suffix) < 2:
+        if not modem_suffix:
             raise ValueError(f"Невозможно определить номер модема из порта: {port}")
-        modem_id = modem_suffix[-2:]
+
+        modem_id = str(int(modem_suffix[-2:]))
 
         change_url = f"http://{host}:33333/modem{modem_id}.php"
+
+        print(f"change_url: {change_url}")
         async with aiohttp.ClientSession() as session:
             async with session.get(
                     change_url,

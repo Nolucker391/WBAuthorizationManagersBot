@@ -1,0 +1,27 @@
+volumes:
+  pg_data_1:
+  pg_data_2:
+
+services:
+
+  postgres_1:
+    image: postgres:17
+    container_name: postgres-db-1
+    ports:
+      - "5432:5432"
+    env_file:
+      - ./env/analitycs.env   # managers
+    volumes:
+      - pg_data_1:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  postgres_2:
+    image: postgres:17
+    container_name: postgres-db-2
+    ports:
+      - "5433:5432"
+    env_file:
+      - ./env/driver.env   # driver
+    volumes:
+      - pg_data_2:/var/lib/postgresql/data
+    restart: unless-stopped
