@@ -90,11 +90,10 @@ class WBActiveOrdersParser:
             print("Нет совпадений, выгрузили 'Нет данных'.")
 
     async def run(self, interval: int = 1800):
-        """Запуск цикла каждые interval секунд (по умолчанию 30 мин)"""
         while True:
             print("=== Запуск парсинга ===")
             df = await self.get_filtered_delivery_info()
-            self.update_google_sheet(df)
+            await asyncio.to_thread(self.update_google_sheet, df)
             print(f"Жду {interval // 60} минут до следующего запуска...\n")
             await asyncio.sleep(interval)
 
