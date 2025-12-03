@@ -41,7 +41,8 @@ class PlaywrightOrdersParser:
         self.cache = self.load_cache()
         self.client = playwright_client
         self.new_request = self.client.context.request
-
+        self.office_cache_file = 'office_address_cache.json'
+        self.office_cache = self.load_office_cache()
 
     def load_cache(self):
         if os.path.exists(self.cache_file):
@@ -52,6 +53,22 @@ class PlaywrightOrdersParser:
     def save_cache(self):
         with open(self.cache_file, 'w') as f:
             json.dump(self.cache, f)
+
+    def load_office_cache(self) -> Dict[str, str]:
+        if os.path.exists(self.office_cache_file):
+            try:
+                with open(self.office_cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def save_office_cache(self):
+        try:
+            with open(self.office_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.office_cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Не удалось сохранить office cache: {e}")
 
     async def get_active_orders(
             self,
@@ -227,24 +244,15 @@ class PlaywrightOrdersParser:
             self,
             office_ids: List[int]
     ) -> Dict[int, str]:
+        if not office_ids:
+            return {}
+
+        logger.info(f"Запрашиваю офисы через API: {office_ids}")
+        result: Dict[int, str] = {}
+
         url = "https://www.wildberries.ru/webapi/lk/myorders/delivery/offices"
         params = "&".join([f"ids={int(i)}" for i in office_ids])
 
-        logger.info(f"Работаю с office_ids: {office_ids}")
-
-        # response = await self.request.fetch(
-        #     url,
-        #     method="POST",
-        #     data=params,
-        #     headers={
-        #         "Accept": "application/json",
-        #         "Authorization": f"Bearer {self.config.token}",
-        #         "DeviceId": self.config.device_id,
-        #         "User-Agent": self.config.useragent,
-        #         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        #     },
-        #     timeout=30_000
-        # )
         response = await self.request.post(
             url,
             headers={
@@ -270,17 +278,25 @@ class PlaywrightOrdersParser:
             raise PlaywrightError(f"HTTP статус {status}: {text}")
 
         data = await response.json()
+        value_list = data.get("value", {})
 
-        out: Dict[int, str] = {}
-
-        value_list = data.get("value", [])
-        for k, v in value_list.items():
-            try:
-                out[int(k)] = v.get("address")
-            except:
-                pass
-
-        return out
+        if not value_list:
+            for office_id in office_ids:
+                result[office_id] = "Адрес старый, неизвестный"
+                self.office_cache[str(office_id)] = "Адрес старый, неизвестный"
+        else:
+            for k, v in value_list.items():
+                try:
+                    office_id = int(k)
+                    address = v.get("address")
+                    if address:
+                        result[office_id] = address
+                        self.office_cache[str(office_id)] = address
+                except Exception:
+                    pass
+        self.save_office_cache()
+        logger.info(f"Сохранено в кэш: {list(result.keys())}")
+        return result
 
     async def get_tracker_status(
             self,

@@ -1,4 +1,5 @@
 # internal_wb_parser_delivery.py
+import os
 import random
 from typing import Optional, Dict, Tuple, List, Any
 import json
@@ -35,6 +36,10 @@ from antibot_system.antibot_logger import logger
 MODEM_FALLBACK_PROXY = "http://admin:admin@94.143.43.213:30620"
 
 last_cleanup_date = None
+
+
+class PlaywrightHangTimeout(Exception):
+    pass
 
 
 def safe_str(v):
@@ -189,7 +194,7 @@ async def get_actual_auth_data():
             WHERE is_verified = true
         """)
         # phone_numbers = [
-        #     "+79888514061"
+        #     "+79047981052"
         # ]
         #
         # rows = await conn.fetch(
@@ -249,6 +254,24 @@ class ManagerParseInfo:
         self.connect_db = connect_db
         self.pw_config = self._create_pw_config()
 
+        self._office_cache: Dict[int, str] = {}
+        self._load_office_cache_file()
+
+    @staticmethod
+    def load_office_cache_file(file_path='office_address_cache.json') -> Dict[str, str]:
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _load_office_cache_file(self):
+        self._office_cache = {
+            int(k): v for k, v in self.load_office_cache_file().items()
+        }
+
     def _create_pw_config(self) -> "PlaywrightConfig":
         """Создаёт объект PlaywrightConfig для текущего пользователя"""
         raw_token = self.phone_data.get('auth_token') or ''
@@ -276,81 +299,242 @@ class ManagerParseInfo:
         """Возвращает текущий PlaywrightConfig"""
         return self.pw_config
 
-    async def parser_office_address(
-            self,
-            office_ids_to_fetch: List[int]
-    ) -> Dict[int, str]:
-        try:
-            async with PlaywrightClient(self.pw_config) as client:
+    async def parser_office_address(self, office_ids_to_fetch: List[int], timeout: int = 60) -> Dict[int, str]:
+        """
+        Возвращает {office_id: address}.
+        Сначала проверяет локальный кэш self._office_cache,
+        потом при отсутствии обращается к PlaywrightOrdersParser.get_offices.
+        """
+        result: Dict[int, str] = {}
+        ids_to_query: List[int] = []
+
+        # Сначала проверяем локальный кэш
+        for oid in office_ids_to_fetch:
+            if oid in self._office_cache:
+                result[oid] = self._office_cache[oid]
+            else:
+                ids_to_query.append(oid)
+
+        if not ids_to_query:
+            return result  # все офисы найдены в кэше
+
+        # Если есть офисы, которых нет в кэше, обращаемся к Playwright
+        for attempt in range(1, 3):
+            client = None
+            active_task = None
+            try:
+                client = PlaywrightClient(self.pw_config)
+                await asyncio.wait_for(client.__aenter__(), timeout)
+
                 parser = PlaywrightOrdersParser(client)
+                active_task = asyncio.create_task(parser.get_offices(ids_to_query))
 
-                resp_fetch_offices = await parser.get_offices(office_ids_to_fetch)
+                try:
+                    new_addresses = await asyncio.wait_for(active_task, timeout)
+                except asyncio.TimeoutError:
+                    if active_task and not active_task.done():
+                        active_task.cancel()
+                        try:
+                            await active_task
+                        except Exception:
+                            pass
+                    if client:
+                        try:
+                            await client.__aexit__(None, None, None)
+                        except Exception:
+                            pass
+                    raise asyncio.TimeoutError("Playwright завис в parser_office_address")
 
-                return resp_fetch_offices
-        except Exception as e:
-            logger.warning(f"Ошибка при парсинге адрессов: {e}")
-            return {}
+                # Обновляем локальный кэш Manager и кэш файла PlaywrightOrdersParser
+                self._office_cache.update(new_addresses)
+                parser.office_cache.update({str(k): v for k, v in new_addresses.items()})
+                parser.save_office_cache()
+
+                result.update(new_addresses)
+                return result
+
+            except (PlaywrightTimeoutError, PlaywrightError) as e:
+                logger.warning(f"[{self.phone_number}] Ошибка parser_office_address ({attempt}/2): {e}")
+                if attempt >= 2:
+                    raise
+                await asyncio.sleep(1)
+
+            except Exception as e:
+                logger.warning(f"[{self.phone_number}] Не удалось получить адреса офисов ({attempt}/2): {e}")
+
+            finally:
+                if active_task and not active_task.done():
+                    try:
+                        active_task.cancel()
+                        await active_task
+                    except Exception:
+                        pass
+                if client:
+                    try:
+                        await client.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    try:
+                        close_fn = getattr(client, "close", None)
+                        if callable(close_fn):
+                            await close_fn()
+                    except Exception:
+                        pass
+
+            await asyncio.sleep(3)
+
+        logger.error(f"[{self.phone_number}] Не удалось получить адреса офисов после 2 попыток")
+        return {oid: "upd" for oid in office_ids_to_fetch}
 
     async def parser_links_checks(
             self,
-            request_params
+            request_params,
+            timeout: int = 60
     ):
-        try:
-            async with PlaywrightClient(self.pw_config) as client:
+        for attempt in range(1, 3):
+            client = None
+            active_task = None
+
+            try:
+                logger.info(f"[parse_links] Попытка {attempt}/2")
+                client = PlaywrightClient(self.pw_config)
+                await asyncio.wait_for(client.__aenter__(), timeout)
+
                 parser = PlaywrightOrdersParser(client)
 
-                resp_fetch_offices = await parser.get_links_receipts(request_params)
+                active_task = asyncio.create_task(parser.get_links_receipts(request_params))
+                try:
+                    result = await asyncio.wait_for(active_task, timeout)
+                    return result
+                except asyncio.TimeoutError:
+                    logger.error("Playwright завис в parser_links — форсируем закрытие")
+                    if active_task and not active_task.done():
+                        active_task.cancel()
+                        try:
+                            await active_task
+                        except Exception:
+                            pass
+                    if client:
+                        try:
+                            await client.__aexit__(None, None, None)
+                        except Exception:
+                            pass
+                        try:
+                            close_fn = getattr(client, "close", None)
+                            if callable(close_fn):
+                                await close_fn()
+                        except Exception:
+                            pass
+                    raise asyncio.TimeoutError("Playwright завис в parser_links")
 
-                return resp_fetch_offices
-        except Exception as e:
-            logger.warning(f"Ошибка при парсинге чеков: {e}")
-            return {}
+            except (PlaywrightTimeoutError, PlaywrightError) as e:
+                logger.warning(f"[{self.phone_number}] Ошибка ({attempt}/2): {e}")
+                if attempt >= 2:
+                    raise
+                logger.info("Рестарт браузера и повтор...")
+                await asyncio.sleep(1)
+
+            except Exception as e:
+                logger.warning(f"[{self.phone_number}] Ошибка ({attempt}/2): {e}")
+
+            finally:
+                if active_task and not active_task.done():
+                    try:
+                        active_task.cancel()
+                        await active_task
+                    except Exception:
+                        pass
+                if client:
+                    try:
+                        await client.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    try:
+                        close_fn = getattr(client, "close", None)
+                        if callable(close_fn):
+                            await close_fn()
+                    except Exception:
+                        pass
+
+            await asyncio.sleep(3)
+
+        logger.error(f"[{self.phone_number}] Не удалось получить чеки после 2 попыток")
+        return {}
 
     async def parse_one_profile(
             self,
             request_data,
-            is_full_parsing: bool = False
+            is_full_parsing: bool = False,
+            timeout: int = 60
     ) -> List[Dict[str, Any]]:
-        """
-            Парсинг одного профиля через Playwright.
-            Возвращает кортеж: (active_orders, delivery_orders)
-        """
+
         pw_proxy_retry_done = False
         pw_modem_switched = False
-
         all_orders: List[Dict[str, Any]] = []
 
         limit = int(request_data.get("limit", 250))
         offset = int(request_data.get("offset", 0))
 
         for attempt in range(1, 3):
+            client = None
+            active_task = None
+
             try:
-                async with PlaywrightClient(self.pw_config) as client:
-                    parser = PlaywrightOrdersParser(client)
+                logger.info(f"[profile] Попытка запуска playwright {attempt}/2")
+                client = PlaywrightClient(self.pw_config)
 
-                    while True:
-                        request_data["limit"] = str(limit)
-                        request_data["offset"] = str(offset)
-                        logger.info(f"Запускаю парсер. Смотрим Флаг: {is_full_parsing}. Offset: {offset}")
+                # запуск контекста
+                await asyncio.wait_for(client.__aenter__(), timeout)
 
-                        resp_data_archive = await parser.get_archived_orders(
-                            request_data
-                        )
+                parser = PlaywrightOrdersParser(client)
 
-                        if not resp_data_archive:
-                            break
+                while True:
+                    request_data["limit"] = str(limit)
+                    request_data["offset"] = str(offset)
+                    logger.info(f"Запускаю парсер. Флаг is_full_parsing: {is_full_parsing}. Offset: {offset}")
 
-                        all_orders.extend(resp_data_archive)
+                    # создаем таску и ставим таймаут
+                    active_task = asyncio.create_task(parser.get_archived_orders(request_data))
+                    try:
+                        resp_data_archive = await asyncio.wait_for(active_task, timeout)
+                    except asyncio.TimeoutError:
+                        logger.error("Playwright завис в get_archived_orders — форсируем закрытие")
+                        # отменяем активную таску
+                        if active_task and not active_task.done():
+                            active_task.cancel()
+                            try:
+                                await active_task
+                            except Exception:
+                                pass
+                        # закрываем клиент полностью
+                        if client:
+                            try:
+                                await client.__aexit__(None, None, None)
+                            except Exception:
+                                pass
+                            try:
+                                close_fn = getattr(client, "close", None)
+                                if callable(close_fn):
+                                    await close_fn()
+                            except Exception:
+                                pass
+                        raise asyncio.TimeoutError("Playwright завис в get_archived_orders")
 
-                        if not is_full_parsing:
-                            break
+                    if not resp_data_archive:
+                        break
 
-                        offset += limit
+                    all_orders.extend(resp_data_archive)
 
-                        # защита от бесконечного цикла
-                        if len(resp_data_archive) < limit:
-                            break
-                    return all_orders
+                    if not is_full_parsing:
+                        break
+
+                    offset += limit
+                    if len(resp_data_archive) < limit:
+                        break
+
+                return all_orders
+            except asyncio.TimeoutError:
+                logger.error("Playwright завис в parse_one_profile_archive — Делаю рестарт и закрытие.")
 
             except ProxyBlockedError:
                 if not pw_proxy_retry_done:
@@ -405,6 +589,33 @@ class ManagerParseInfo:
                 logger.info(f"[{self.phone_number}] рестарт браузера и повтор...")
                 await asyncio.sleep(1)
 
+            except Exception as e:
+                logger.warning(
+                    f"[{self.phone_number}] ошибка ({attempt}/2): {e}"
+                )
+
+            finally:
+                if active_task and not active_task.done():
+                    try:
+                        active_task.cancel()
+                        await active_task
+                    except Exception:
+                        pass
+                if client:
+                    try:
+                        await client.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    try:
+                        close_fn = getattr(client, "close", None)
+                        if callable(close_fn):
+                            await close_fn()
+                    except Exception:
+                        pass
+
+            await asyncio.sleep(3)
+
+        logger.error(f"[{self.phone_number}] Playwright полностью упал")
         return []
 
 async def parse_archive_data(
